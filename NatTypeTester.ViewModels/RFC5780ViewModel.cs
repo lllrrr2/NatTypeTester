@@ -7,6 +7,7 @@ using ReactiveUI;
 using Socks5.Models;
 using STUN;
 using STUN.Client;
+using STUN.Enums;
 using STUN.Proxy;
 using STUN.StunResult;
 using System.Net;
@@ -28,19 +29,38 @@ public class RFC5780ViewModel : ViewModelBase, IRoutableViewModel
 	private IDnsClient AAAADnsClient => LazyServiceProvider.LazyGetRequiredService<DefaultAAAAClient>();
 	private IDnsClient ADnsClient => LazyServiceProvider.LazyGetRequiredService<DefaultAClient>();
 
-	public StunResult5389 Result5389 { get; set; }
+	private StunResult5389 _result5389;
+	public StunResult5389 Result5389
+	{
+		get => _result5389;
+		set => this.RaiseAndSetIfChanged(ref _result5389, value);
+	}
+
+	private StunResult5389 _udpResult;
+	private StunResult5389 _tcpResult;
+	private StunResult5389 _tlsResult;
+
+	private TransportType _transportType;
+	public TransportType TransportType
+	{
+		get => _transportType;
+		set => this.RaiseAndSetIfChanged(ref _transportType, value);
+	}
 
 	public ReactiveCommand<Unit, Unit> DiscoveryNatType { get; }
 
 	public RFC5780ViewModel()
 	{
-		Result5389 = new StunResult5389();
+		_udpResult = new StunResult5389();
+		_tcpResult = new StunResult5389();
+		_tlsResult = new StunResult5389();
+		_result5389 = _udpResult;
 		DiscoveryNatType = ReactiveCommand.CreateFromTask(DiscoveryNatTypeAsync);
 	}
 
 	private async Task DiscoveryNatTypeAsync(CancellationToken token)
 	{
-		Verify.Operation(StunServer.TryParse(Config.StunServer, out StunServer? server), @"Wrong STUN Server!");
+		Verify.Operation(StunServer.TryParse(Config.StunServer, out StunServer? server, TransportType is TransportType.Tls ? StunServer.DefaultTlsPort : StunServer.DefaultPort), @"Wrong STUN Server!");
 
 		if (!HostnameEndpoint.TryParse(Config.ProxyServer, out HostnameEndpoint? proxyIpe))
 		{
@@ -76,29 +96,77 @@ public class RFC5780ViewModel : ViewModelBase, IRoutableViewModel
 			}
 		}
 
-		using IUdpProxy proxy = ProxyFactory.CreateProxy(Config.ProxyType, Result5389.LocalEndPoint, socks5Option);
-
-		using StunClient5389UDP client = new(new IPEndPoint(serverIp, server.Port), Result5389.LocalEndPoint, proxy);
-
-		Result5389 = client.State;
-		using (Observable.Interval(TimeSpan.FromSeconds(0.1))
-				.ObserveOn(RxApp.MainThreadScheduler)
-				.Subscribe(_ => this.RaisePropertyChanged(nameof(Result5389))))
+		TransportType transport = TransportType;
+		if (transport is TransportType.Udp)
 		{
-			await client.ConnectProxyAsync(token);
+			using IUdpProxy proxy = ProxyFactory.CreateProxy(Config.ProxyType, Result5389.LocalEndPoint, socks5Option);
+			using StunClient5389UDP client = new(new IPEndPoint(serverIp, server.Port), Result5389.LocalEndPoint, proxy);
+
 			try
 			{
-				await client.QueryAsync(token);
+				using (Observable.Interval(TimeSpan.FromSeconds(0.1))
+						.ObserveOn(RxApp.MainThreadScheduler)
+						// ReSharper disable once AccessToDisposedClosure
+						.Subscribe(_ => Result5389 = _udpResult = client.State with { }))
+				{
+					await client.ConnectProxyAsync(token);
+					try
+					{
+						await client.QueryAsync(token);
+					}
+					finally
+					{
+						await client.CloseProxyAsync(token);
+					}
+				}
 			}
 			finally
 			{
-				await client.CloseProxyAsync(token);
+				Result5389 = _udpResult = client.State with { };
 			}
 		}
+		else
+		{
+			using ITcpProxy proxy = ProxyFactory.CreateProxy(transport, Config.ProxyType, socks5Option, server.Hostname);
+			using IStunClient5389 client = new StunClient5389TCP(new IPEndPoint(serverIp, server.Port), Result5389.LocalEndPoint, proxy);
 
-		Result5389 = new StunResult5389();
-		Result5389.Clone(client.State);
+			try
+			{
+				using (Observable.Interval(TimeSpan.FromSeconds(0.1))
+						.ObserveOn(RxApp.MainThreadScheduler)
+						.Subscribe(_ => UpdateData()))
+				{
+					await client.QueryAsync(token);
+				}
+			}
+			finally
+			{
+				UpdateData();
+			}
 
-		this.RaisePropertyChanged(nameof(Result5389));
+			void UpdateData()
+			{
+				// ReSharper disable once AccessToDisposedClosure
+				Result5389 = client.State with { };
+				if (transport is TransportType.Tcp)
+				{
+					_tcpResult = Result5389;
+				}
+				else
+				{
+					_tlsResult = Result5389;
+				}
+			}
+		}
+	}
+
+	public void ResetResult()
+	{
+		Result5389 = TransportType switch
+		{
+			TransportType.Tcp => _tcpResult,
+			TransportType.Tls => _tlsResult,
+			_ => _udpResult
+		};
 	}
 }

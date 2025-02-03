@@ -31,14 +31,14 @@ public partial class MainWindow : ISingletonDependency
 
 			#endregion
 
-			this.Bind(ViewModel, vm => vm.Router, v => v.RoutedViewHost.Router).DisposeWith(d);
+			this.OneWayBind(ViewModel, vm => vm.Router, v => v.RoutedViewHost.Router).DisposeWith(d);
 
 			NavigationView.Events().SelectionChanged
 				.Subscribe(parameter =>
 				{
 					if (parameter.args.IsSettingsSelected)
 					{
-						ViewModel.Router.Navigate.Execute(serviceProvider.GetRequiredService<SettingViewModel>());
+						ViewModel.Router.Navigate.Execute(serviceProvider.GetRequiredService<SettingViewModel>()).Subscribe().Dispose();
 						return;
 					}
 
@@ -51,12 +51,12 @@ public partial class MainWindow : ISingletonDependency
 					{
 						case @"1":
 						{
-							ViewModel.Router.Navigate.Execute(serviceProvider.GetRequiredService<RFC5780ViewModel>());
+							ViewModel.Router.Navigate.Execute(serviceProvider.GetRequiredService<RFC5780ViewModel>()).Subscribe().Dispose();
 							break;
 						}
 						case @"2":
 						{
-							ViewModel.Router.Navigate.Execute(serviceProvider.GetRequiredService<RFC3489ViewModel>());
+							ViewModel.Router.Navigate.Execute(serviceProvider.GetRequiredService<RFC3489ViewModel>()).Subscribe().Dispose();
 							break;
 						}
 					}
